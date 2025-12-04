@@ -2,97 +2,96 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
 
+import dateparser
 from agents.tool import function_tool
+from sqlmodel import select, Session
 
-@dataclass
-class Task:
-    id: int
-    description: str
-    created_at: str
-    due: Optional[str] = None
-    status: str = "pending"
-    priority: str = "normal"
+from lifeos.db import engine
+from lifeos.models import Task
+from sqlmodel import Field, select
 
-@dataclass
-class TaskList:
-    tasks: List[Task] = field(default_factory=list)
-    
-    def add_task(
-        self,
+def _parse_due_date(due_text: Optional[str]) -> Optional[datetime]:
+    """
+    Parse natural language date/time (e.g. 'tomorrow 5pm') into a datetime.
+    Returns None if parsing fails or due_text is None.
+    """
+    if not due_text:
+        return None
+
+    parsed = dateparser.parse(due_text)
+    return parsed
+
+
+def _format_datetime(dt: Optional[datetime]) -> str:
+    """
+    Format a datetime for display, or return 'None' if not set.
+    """
+    if dt is None:
+        return "None"
+    return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+@function_tool
+def add_task(
         description: str,
         due: Optional[str] = None,
         priority: str = "normal",
-    ) -> Task:
-        now_iso = datetime.utcnow().isoformat()
-        new_task = Task(
-            id=len(self.tasks) + 1,
-            description=description,
-            created_at=now_iso,
-            due=due,
-            priority=priority,
-        )
-        self.tasks.append(new_task)
-        return new_task
-
-    def list_tasks(self):
-        return self.tasks
-
-    def delete_task(self, id: int):
-        # Simple deletion by filtering, assuming IDs might not be contiguous or handling index
-        # For simplicity, let's just remove by ID if found
-        for i, task in enumerate(self.tasks):
-            if task.id == id:
-                self.tasks.pop(i)
-                return True
-        return False
-
-# Instantiate the global task list
-task_list = TaskList()
-
-@function_tool
-def add_task_tool(description: str, due: Optional[str] = None, priority: str = "normal") -> str:
+    ) -> str:
     """
-    Add a new task to the LifeOS task list.
+    Add a new task to the LifeOS task list and store it in the database.
 
     Args:
         description: What the task is about.
         due: Optional due date/time in natural language (e.g. 'tomorrow 5pm').
-        priority: Optional priority level (e.g. 'high', 'normal', 'low').
-    """   
-    new_task = task_list.add_task(description, due, priority)
-    message = ['Task added:',
-    f'ID: {new_task.id}',
-    f'Description: {new_task.description}',    
-    f'Priority: {new_task.priority}',
-    ]
-    if new_task.due:
-        message.append(f'Due: {new_task.due}')
+    """
+    due_dt = _parse_due_date(due)
+    with Session(engine) as session:
+        new_task = Task(
+            description=description,
+            due=due_dt,
+            priority=priority,
+        )
+        session.add(new_task)
+        session.commit()
+        session.refresh(new_task)
 
-    return '\n'.join(message)   
+        lines = [
+            f"Task added:",
+            f"ID: {new_task.id}",
+            f"Description: {new_task.description}",
+            f"Priority: {new_task.priority}",
+        ]
+        if new_task.due:
+            lines.append(f"Due: {new_task.due}")
+
+        return "\n".join(lines)
 
 @function_tool
-def list_tasks_tool() -> str:
+def list_tasks(status: Optional[str] = None) -> str:
     """
     List all tasks in the LifeOS task list.
 
-    """
-    tasks = task_list.list_tasks()
-    if not tasks:
-        return 'No tasks added yet.'
-
-    return '\n'.join([f'ID: {task.id}\nDescription: {task.description}\nPriority: {task.priority}\nDue: {task.due}' for task in tasks])
-
-@function_tool
-def delete_task_tool(id: int) -> str:
-    """
-    Delete a task from the LifeOS task list.
-
     Args:
-        id: The ID of the task to delete.
+        status: Optional filter (e.g. 'pending', 'done'). If None, show all tasks.
+    
     """
-    success = task_list.delete_task(id)
-    if success:
-        return f'Task {id} deleted.'
-    else:
-        return f'Task {id} not found.'
+    with Session(engine) as session:
+        if status:
+            tasks_list = session.exec(select(Task).where(Task.status == status)).all()
+        else:
+            tasks_list = session.exec(select(Task)).all()
+
+        if not tasks_list:
+            return "No tasks found."
+
+        lines = []
+        for task in tasks_list:
+            lines.append(f"ID: {task.id}")
+            lines.append(f"Description: {task.description}")
+            lines.append(f"Priority: {task.priority}")
+            if task.due:
+                lines.append(f"Due: {task.due}")
+            lines.append("---")
+
+        return "\n".join(lines)    
+
 
